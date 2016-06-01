@@ -53,6 +53,7 @@ set(EXE_LIST
   kenlm_benchmark
   automaton
 )
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
 set(LM_LIBS kenlm kenlm_util ${Boost_LIBRARIES} ${THREADS})
 
