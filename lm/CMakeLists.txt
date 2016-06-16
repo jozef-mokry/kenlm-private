@@ -51,7 +51,7 @@ set(EXE_LIST
   fragment
   build_binary
   kenlm_benchmark
-  automaton
+  automaton_benchmark
 )
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
 
