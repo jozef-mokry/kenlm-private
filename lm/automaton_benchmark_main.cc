@@ -28,27 +28,34 @@ struct Config {
     int fd_in;
 };
 
-template <typename Callback, typename Width>
+template <typename Callback>
 void PipelineScore(lm::Pipeline<Callback>& pipeline, const lm::ngram::ProbingModel& model, const Config& options){
-    const Width kEOS = model.GetVocabulary().EndSentence();
+    const lm::WordIndex kEOS = model.GetVocabulary().EndSentence();
     const lm::ngram::State begin_state = model.BeginSentenceState();
-    std::array<Width, 49806> buff;
+    std::array<lm::WordIndex, 49806> buff;
     util::SeekOrThrow(options.fd_in, 0);
 
     //start timer
     auto time = util::CPUTime();
-    bool new_sentence = true;
+    std::size_t overhang = 0;
     while (true) {
-      std::size_t got = util::ReadOrEOF(options.fd_in, buff.begin(), buff.size() * sizeof(Width));
-      if (!got) break;
-      UTIL_THROW_IF2(got % sizeof(Width), "File size not a multiple of vocab id size " << sizeof(Width));
-      auto end = buff.begin() + got / sizeof(Width);
-      auto curr = buff.begin();
-      while(curr != end) {
-          if (new_sentence) pipeline.FullScore(begin_state, *curr);
-          else pipeline.AppendWord(*curr);
-          new_sentence = *curr++ == kEOS;
-      }
+        std::size_t got = util::ReadOrEOF(options.fd_in, buff.begin() + overhang, (buff.size() - overhang) * sizeof(lm::WordIndex));
+        if (!got) break;
+        UTIL_THROW_IF2(got % sizeof(lm::WordIndex), "File size not a multiple of vocab id size " << sizeof(lm::WordIndex));
+        auto curr = buff.begin();
+        auto end = curr + overhang + (got / sizeof(lm::WordIndex));
+        auto sentence_begin = curr;
+        while(curr != end) {
+            if (*curr++ == kEOS) {
+                pipeline.AppendWords(begin_state, sentence_begin, curr);
+                sentence_begin = curr;
+            }
+        }
+        UTIL_THROW_IF2(sentence_begin - buff.begin() == 0, "Buffer is too small");
+        //Copy unused words
+        std::copy(sentence_begin, end, buff.begin());
+        overhang = end-sentence_begin;
+        //std::cout << "Overhang" << overhang << '\n';
     }
     pipeline.Drain();
     //stop timer
@@ -56,12 +63,11 @@ void PipelineScore(lm::Pipeline<Callback>& pipeline, const lm::ngram::ProbingMod
     std::cout << time << ' ';
 }
 
-template<typename Width>
 void ModelScore(const lm::ngram::ProbingModel& model, const Config& options){
-    const Width kEOS = model.GetVocabulary().EndSentence();
+    const lm::WordIndex kEOS = model.GetVocabulary().EndSentence();
     const lm::ngram::State* const begin_state = &model.BeginSentenceState();
     const lm::ngram::State *in_state = begin_state;
-    std::array<Width, 49806> buff;
+    std::array<lm::WordIndex, 49806> buff;
     lm::ngram::State states[3];
     long double score = 0.0;
 
@@ -69,10 +75,10 @@ void ModelScore(const lm::ngram::ProbingModel& model, const Config& options){
     auto time = util::CPUTime();
     bool new_sentence = true;
     while (true) {
-      std::size_t got = util::ReadOrEOF(options.fd_in, buff.begin(), buff.size() * sizeof(Width));
+      std::size_t got = util::ReadOrEOF(options.fd_in, buff.begin(), buff.size() * sizeof(lm::WordIndex));
       if (!got) break;
-      UTIL_THROW_IF2(got % sizeof(Width), "File size not a multiple of vocab id size " << sizeof(Width));
-      auto even_end = buff.begin() + ((got / sizeof(Width)) & ~1);
+      UTIL_THROW_IF2(got % sizeof(lm::WordIndex), "File size not a multiple of vocab id size " << sizeof(lm::WordIndex));
+      auto even_end = buff.begin() + ((got / sizeof(lm::WordIndex)) & ~1);
       auto curr = buff.begin();
       while(curr != even_end) {
         score += model.FullScore(*in_state, *curr, states[1]).prob;
@@ -91,9 +97,8 @@ void ModelScore(const lm::ngram::ProbingModel& model, const Config& options){
     std::cerr << "Score(model) : " << std::setprecision(std::numeric_limits<long double>::digits10 + 1) << score << std::endl;
 }
 
-template<typename Width>
 void DispatchFunction(lm::ngram::ProbingModel& model, const Config& options){
-    if (options.type == "probing") ModelScore<Width>(model, options);
+    if (options.type == "probing") ModelScore(model, options);
     else if (options.type == "pipeline") {
         long double score = 0.0;
         const auto callback = [&score](const lm::FullScoreReturn& r){score += r.prob;};
@@ -101,24 +106,12 @@ void DispatchFunction(lm::ngram::ProbingModel& model, const Config& options){
         for (std::size_t pipeline_size = options.pipeline_size_start; pipeline_size <= options.pipeline_size_end; ++pipeline_size) {
             score = 0.0;
             lm::Pipeline<decltype(callback)> pipeline(pipeline_size, construct);
-            PipelineScore<decltype(callback), Width>(pipeline, model, options);
+            PipelineScore<decltype(callback)>(pipeline, model, options);
             std::cerr << "Score(pipeline): " << std::setprecision(std::numeric_limits<long double>::digits10 + 1) << score << std::endl;
         }
     }
 }
 
-void DispatchWidth(lm::ngram::ProbingModel& model, const Config& options) {
-  uint64_t bound = model.GetVocabulary().Bound();
-  if (bound <= 256) {
-    DispatchFunction<uint8_t>(model, options);
-  } else if (bound <= 65536) {
-    DispatchFunction<uint16_t>(model, options);
-  } else if (bound <= (1ULL << 32)) {
-    DispatchFunction<uint32_t>(model, options);
-  } else {
-    DispatchFunction<uint64_t>(model, options);
-  }
-}
 
 
 int main(int argc, char* argv[]){
@@ -140,5 +133,5 @@ int main(int argc, char* argv[]){
     config.probing_multiplier = 1.5;
     lm::ngram::ProbingModel model(options.model_file, config);
 
-    DispatchWidth(model, options);
+    DispatchFunction(model, options);
 }

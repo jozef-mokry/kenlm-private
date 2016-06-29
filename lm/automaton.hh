@@ -26,6 +26,7 @@ template <typename Value, typename Callback> class NGramAutomaton {
         struct NGramTask {
             NGramAutomaton<Value, Callback>* const pred;
             const WordIndex new_word;
+            const WordIndex* const context_word;
             const State* const context_state; // unused if pred != nullptr
         };
 
@@ -90,6 +91,7 @@ template <typename Value, typename Callback> class NGramAutomaton {
             search_.PrefetchUnigram(new_word_);
             next_action_ = NextAction::GET_UNIGRAM_PREFETCH_NEXT;
             ngram_order_ = 1;
+            context_word_ = task.context_word;
         }
 
         bool Finished() {
@@ -102,7 +104,7 @@ template <typename Value, typename Callback> class NGramAutomaton {
             assert(task.pred == nullptr ^ task.context_state == nullptr); //either predecessor is set or context_state
             pred_ = task.pred;
             if (pred_) {
-                CopyContextWordsFromPredecessor();
+                //CopyContextWordsFromPredecessor();
                 in_state_.length = pred_->out_state_.length;
                 pred_finished_ = pred_->Finished();
 
@@ -119,21 +121,21 @@ template <typename Value, typename Callback> class NGramAutomaton {
             else {
                 //copy from context state
                 pred_finished_ = true;
-                std::copy(task.context_state->words, task.context_state->words + task.context_state->length, in_state_.words);
+                //std::copy(task.context_state->words, task.context_state->words + task.context_state->length, in_state_.words);
                 std::copy(task.context_state->backoff, task.context_state->backoff + task.context_state->length, in_state_.backoff);
                 in_state_.length = task.context_state->length;
             }
         }
 
-        void CopyContextWordsFromPredecessor(){
-            //pred_ might equal this, hence the copying order
-            auto length = MAX_ORDER - 2;
+      //void CopyContextWordsFromPredecessor(){
+      //    //pred_ might equal this, hence the copying order
+      //    auto length = MAX_ORDER - 2;
 
-            auto from = pred_->in_state_.words + length - 1;
-            auto to = in_state_.words + length;
-            for(; from >= pred_->in_state_.words; --from, --to){*to = *from;}
-            in_state_.words[0] = pred_->new_word_;
-        }
+      //    auto from = pred_->in_state_.words + length - 1;
+      //    auto to = in_state_.words + length;
+      //    for(; from >= pred_->in_state_.words; --from, --to){*to = *from;}
+      //    in_state_.words[0] = pred_->new_word_;
+      //}
 
         void CheckSuccessorFinished(){
             if (succ_finished_) {
@@ -204,7 +206,7 @@ template <typename Value, typename Callback> class NGramAutomaton {
             }
             else {
                 //bigrams are not supported
-                search_.PrefetchMiddle(0, in_state_.words[0], node_);
+                search_.PrefetchMiddle(0, *context_word_--, node_);
                 next_action_ = NextAction::GET_MIDDLE_PREFETCH_NEXT;
             }
         }
@@ -232,11 +234,11 @@ template <typename Value, typename Callback> class NGramAutomaton {
             }
 
             if (ngram_order_ + 1 == MAX_ORDER){
-                search_.PrefetchLongest(in_state_.words[ngram_order_ - 1], node_);
+                search_.PrefetchLongest(*context_word_, node_);
                 next_action_ = NextAction::GET_LONGEST;
             }
             else {
-                search_.PrefetchMiddle(ngram_order_ - 1, in_state_.words[ngram_order_ - 1], node_);
+                search_.PrefetchMiddle(ngram_order_ - 1, *context_word_--, node_);
                 //next_action_ is already GET_MIDDLE_PREFETCH_NEXT
             }
         }
@@ -284,6 +286,7 @@ template <typename Value, typename Callback> class NGramAutomaton {
         WordIndex new_word_;
         FullScoreReturn ret_;
         State in_state_;
+        const WordIndex* context_word_;
         //out_state_ stores the backoffs for its successor
         //out_state_.length starts as an upper bound for the context_length but is correct at latest when the automaton finishes
         State out_state_;
@@ -342,26 +345,86 @@ template<typename Callback>
 class Pipeline {
 
     public:
-        Pipeline(std::size_t queue_size, typename ngram::NGramAutomaton<ngram::BackoffValue, Callback>::Construct construct) : queue_(queue_size, construct) {}
-        void FullScore(const lm::ngram::State& context_state, const WordIndex word) {
-            pred_ = queue_.Add({nullptr, word, &context_state});
+        Pipeline(std::size_t queue_size, typename ngram::NGramAutomaton<ngram::BackoffValue, Callback>::Construct construct) : size_(queue_size), queue_(queue_size, construct), buff(queue_size*KENLM_MAX_ORDER), curr_(buff.begin()) {
+            UTIL_THROW_IF2(queue_size > MAX_SIZE, "Queue size too big");
         }
+     // void FullScore(const lm::ngram::State& context_state, const WordIndex word) {
+     //     pred_ = queue_.Add({nullptr, word, &context_state});
+     // }
 
-        void AppendWord(const WordIndex word){
-            assert(pred_);
-            pred_ = queue_.Add({pred_, word, nullptr});
-        }
+     // void AppendWord(const WordIndex word){
+     //     assert(pred_);
+     //     pred_ = queue_.Add({pred_, word, nullptr});
+     // }
 
         void Drain() {
             queue_.Drain();
         }
 
+        void AppendWords(const lm::ngram::State& context_state, const WordIndex* new_words_begin, const WordIndex* new_words_end) {
+            //do a bounds check
+            std::size_t new_words_count = new_words_end - new_words_begin;
+            std::size_t count = new_words_count + context_state.length;
+            //std::cout << count << "Count\n";
+            //std::cout<< buff.end() - curr_ << std::endl;
+            //copy context_state_words
+            auto to = curr_->begin();
+            to = std::reverse_copy(context_state.words, context_state.words + context_state.length, to);
+            pred_ = nullptr;
 
+            //copy all words into buffer
+            if (new_words_count < BUFF_SIZE) {
+                //std::cout << "easy case\n";
+                const WordIndex* prev = to - 1;
+                for(;new_words_begin != new_words_end; ++new_words_begin) {
+                    *to = *new_words_begin;
+                    pred_ = queue_.Add({pred_, *to, prev, &context_state});
+                    prev = to++;
+                }
+            }
+            else {
+                //std::cout << "hard case\n";
+                //copy first KENLM_MAX_ORDER - 1 words to follow context words
+                const WordIndex* prev = to - 1;
+                auto from = new_words_begin;
+                auto end = new_words_begin + KENLM_MAX_ORDER - 1;
+                for(;from != end; ++from) {
+                    *to = *from;
+                    pred_ = queue_.Add({pred_, *to, prev, &context_state});
+                    prev = to++;
+                }
+                //then do queries that will read from memory allocated by called
+                end = new_words_end - size_*KENLM_MAX_ORDER;
+                prev = from - 1;
+                while(from!=end) pred_=queue_.Add({pred_, *from++, prev++, &context_state});
+                
+                //finally store last KENLM_MAX_ORDER-1 + size_*KENLM_MAX_ORDER in buffer
+                auto copyFrom = from - (KENLM_MAX_ORDER - 1); 
+                while(copyFrom!=from) *to++ = *copyFrom++;
+                prev = to - 1;
+                for(;from != new_words_end; ++from) {
+                    *to = *from;
+                    pred_ = queue_.Add({pred_, *to, prev, &context_state});
+                    prev = to++;
+                }
+            }
+            Next();
+        }
+        
     private:
+
+        void Next(){
+            if (++curr_ == buff.end()) curr_ = buff.begin();
+        }
         using Task = typename ngram::NGramAutomaton<ngram::BackoffValue, Callback>::Task;
 
+        std::size_t size_;
         Queue<ngram::NGramAutomaton<ngram::BackoffValue, Callback>> queue_;
         ngram::NGramAutomaton<ngram::BackoffValue, Callback>* pred_;
+        static const std::size_t MAX_SIZE = 32;
+        static const std::size_t BUFF_SIZE = 2*KENLM_MAX_ORDER - 2 + MAX_SIZE*KENLM_MAX_ORDER;
+        std::vector<std::array<WordIndex, BUFF_SIZE>> buff;
+        decltype(buff.begin()) curr_;
 
 };
 
