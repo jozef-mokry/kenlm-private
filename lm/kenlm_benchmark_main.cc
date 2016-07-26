@@ -145,13 +145,13 @@ template <class Model> void DispatchWidth(const char *file, const Config &config
   Model model(file, model_config);
   uint64_t bound = model.GetVocabulary().Bound();
   if (bound <= 256) {
-    DispatchFunction<Model, uint8_t>(model, config);
+    DispatchFunction<Model, lm::WordIndex>(model, config);
   } else if (bound <= 65536) {
-    DispatchFunction<Model, uint16_t>(model, config);
+    DispatchFunction<Model, lm::WordIndex>(model, config);
   } else if (bound <= (1ULL << 32)) {
-    DispatchFunction<Model, uint32_t>(model, config);
+    DispatchFunction<Model, lm::WordIndex>(model, config);
   } else {
-    DispatchFunction<Model, uint64_t>(model, config);
+    DispatchFunction<Model, lm::WordIndex>(model, config);
   }
 }
 

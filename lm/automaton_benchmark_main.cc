@@ -138,6 +138,7 @@ int main(int argc, char* argv[]){
     config.messages = &std::cout;
     config.positive_log_probability = lm::SILENT;
     config.probing_multiplier = 1.5;
+    config.load_method = util::READ;
     lm::ngram::ProbingModel model(options.model_file, config);
 
     DispatchWidth(model, options);
